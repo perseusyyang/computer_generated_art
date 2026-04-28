@@ -1,0 +1,251 @@
+---
+title: "computer_generated_art"
+author: "Perseus Yang"
+date: "2026-04-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+All emojis designed by OpenMoji – the open-source emoji and icon project. License: CC BY-SA 4.0
+https://github.com/hfg-gmuend/openmoji#attribution-requirements
+
+
+```{r}
+#install.packages("magick")
+#install.packages("tidyverse")
+#install.packages("imager")
+```
+
+```{r}
+library(magick)
+library(tidyverse)
+library(imager)
+library(grid)
+```
+
+```{r}
+img_to_mtx <- function(img) {
+  return(as.array(img))
+}
+
+mtx_to_img <- function(mtx) {
+  return(as.cimg(mtx))
+}
+
+resize_img <- function(img, width, height) {
+  resized <- resize(img, size_x = width, size_y = height) # changed imresize to resize
+  return(resized)
+}
+
+clip_img <- function(img, clip_region) {
+  
+  x0 <- as.numeric(clip_region[1])
+  y0 <- as.numeric(clip_region[2])
+  w0 <- as.numeric(clip_region[3])
+  h0 <- as.numeric(clip_region[4])
+  
+  return(imager::imsub(
+  img,
+  x %inr% c(x0, x0 + w0),
+  y %inr% c(y0, y0 + h0)
+  )) # changed from crop.bbox
+  
+}
+```
+
+```{r}
+flatten_mtx <- function(mtx, with_alpha = FALSE) {
+  dims <- dim(mtx)
+  h <- dims[1]
+  w <- dims[2]
+  
+  r <- as.vector(mtx[, , 1, 1])
+  g <- as.vector(mtx[, , 1, 2])
+  b <- as.vector(mtx[, , 1, 3])
+  
+  if (with_alpha) {
+    a <- as.vector(mtx[, , 1, 4])
+    flattened_mtx <- cbind(r, g, b, a)
+    colnames(flattened_mtx) <- c("r", "g", "b", "a")
+  } else {
+    flattened_mtx <- cbind(r, g, b)
+    colnames(flattened_mtx) <- c("r", "g", "b")
+  }
+
+  return(flattened_mtx)
+}
+
+get_tone <- function(mtx) {
+  mtx <- flatten_mtx(mtx, with_alpha=TRUE)
+  valid_area <- mtx[, "a"] != 0
+
+  r_mean <- mean(mtx[, "r"][valid_area])
+  g_mean <- mean(mtx[, "g"][valid_area])
+  b_mean <- mean(mtx[, "b"][valid_area])
+
+  return(c(r_mean, g_mean, b_mean))
+}
+
+rgb_to_brightness <- function(r, g, b) {
+  # Calculate the brightness of a color. The return value is a scalar
+  pix_brightness <- r * 0.299 + g * 0.587 + b * 0.114
+  return(pix_brightness)
+}
+
+img_discolor <- function(mtx) {
+  flat_mtx <- flatten_mtx(mtx)
+  n_pix <- nrow(flat_mtx)
+  brightness <- rgb_to_brightness(flat_mtx[, 1], flat_mtx[, 2], flat_mtx[, 3])
+  mtx[, , , 1] <- mtx[, , , 2] <- mtx[, , , 3] <- brightness
+  return(mtx)
+}
+
+brightness_similarity <- function(color_1, color_2) {
+  # Calculate the linear similarity between two colors' brightness, which ranges
+  # from 0 to 1.
+  # 1 means the same brightness.
+  brightness_1 <- rgb_to_brightness(color_1[1], color_1[2], color_1[3])
+  brightness_2 <- rgb_to_brightness(color_2[1], color_2[2], color_2[3])
+  return(1 - abs(brightness_1 - brightness_2))
+}
+
+normalize_rgb <- function(pix_color) {
+  color_norm <- sqrt(pix_color[1] ^ 2 + pix_color[2] ^ 2 + pix_color[3] ^ 2)
+  if (color_norm == 0)
+    color_norm <- 1e-6
+  pix_color <- pix_color / color_norm
+  return(pix_color)
+}
+
+```
+
+
+```{r}
+get_tone_colors <- function(emoji_folder_path) {
+    emojis <- list.files(emoji_folder_path)
+    tone_mtx <- matrix(numeric(), ncol=3)
+    colnames(tone_mtx) <- c("r", "g", "b")
+    counts <- 1
+    for (i in emojis) {
+        img <- load.image(file.path(emoji_folder_path, i))
+        img_mtx <- img_to_mtx(img)
+        tone <- get_tone(img_mtx)
+        tone_row_vec <- t(as.matrix(tone))
+        tone_mtx <- rbind(tone_mtx, tone_row_vec)
+        rownames(tone_mtx)[counts] <- i
+        counts <- counts + 1
+    }
+    
+    return(tone_mtx)
+}
+
+match_emoji <- function(img_mtx, tone_mtx) {
+    row_num <- dim(img_mtx)[1]
+    col_num <- dim(img_mtx)[2]
+    
+    flattened_img <- flatten_mtx(img_mtx)
+    normalized_img <- t(apply(flattened_img, 1, normalize_rgb))
+    normalized_tones <- t(apply(tone_mtx, 1, normalize_rgb))
+
+    color_sim_mtx <- normalized_img %*% t(normalized_tones)
+    emoji_names <- colnames(color_sim_mtx)
+    emoji_name_matched <- emoji_names[max.col(color_sim_mtx)]
+    dim(emoji_name_matched) <- c(row_num, col_num)
+    
+    return(emoji_name_matched)
+}
+
+```
+
+```{r}
+generate_mosaic <- function(emoji_mtx,
+                            emoji_folder_path,
+                            output_file,
+                            emoji_size = 20,
+                            overlap_ratio = 1.5) { 
+
+  n_rows <- nrow(emoji_mtx)
+  n_cols <- ncol(emoji_mtx)
+
+  canvas_width  <- n_cols * emoji_size
+  canvas_height <- n_rows * emoji_size
+
+  unique_files <- unique(as.vector(emoji_mtx))
+  emoji_cache <- list()
+
+  for (f in unique_files) {
+    full_path <- file.path(emoji_folder_path, f)
+    if (file.exists(full_path)) {
+      img <- image_read(full_path)
+      img <- image_scale(img, paste0(emoji_size, "x", emoji_size))
+      emoji_cache[[f]] <- as.raster(img)
+    }
+  }
+
+  png(filename = output_file,
+      width  = canvas_width,
+      height = canvas_height,
+      bg = "white")
+   
+  grid.newpage()
+  
+  unit_w <- emoji_size / canvas_width
+  unit_h <- emoji_size / canvas_height
+
+  for (i in 1:n_rows) {
+    for (j in 1:n_cols) {
+      fname <- emoji_mtx[i, j]
+      img_raster <- emoji_cache[[fname]]
+      if (!is.null(img_raster)) {
+
+        x_center <- (j - 0.5) / n_cols
+        y_center <- 1 - (i - 0.5) / n_rows
+
+        grid.raster(img_raster,
+                    x = x_center,
+                    y = y_center,
+                    width  = unit_w * overlap_ratio,
+                    height = unit_h * overlap_ratio,
+                    just = "center")
+      }
+    }
+  }
+
+  dev.off()
+}
+
+img <- load.image("./input/7.jpg")
+
+# Emoji Mosaic Art
+emoji_folder <- "./openmoji-72x72-color/"
+tones <- get_tone_colors(emoji_folder)
+emoji_mtx <- local({
+  img_low <- resize_img(img, 100, 65)
+  img_low_mtx <- img_to_mtx(img_low)
+  img_low_mtx <- aperm(img_low_mtx, c(2, 1, 3, 4))
+  matched <- match_emoji(img_low_mtx, tones)
+  matched
+})
+
+img_width <- dim(emoji_mtx)[2]
+generate_mosaic(emoji_mtx,
+                emoji_folder,
+                output_file="./output/mosaic.png",
+                emoji_size=30,
+                overlap_ratio = 2.5)
+
+# Image Discoloration
+img_mtx <- img_to_mtx(img)
+img_gray_mtx <- img_discolor(img_mtx)
+img_gray <- mtx_to_img(img_gray_mtx)
+save.image(img_gray, "./output/gray.png")
+
+# Image Gaussian Blur
+img_blur <- isoblur(img, sigma = 7)
+save.image(img_blur, "./output/blur.png")
+
+```
